@@ -151,8 +151,8 @@ class CMASolver(Solver):
 
 class LPSolver(Solver):
     def __init__(
-        self, 
-        ingredients, 
+        self,
+        ingredients,
         preload_recipe_fpath: Optional[str] = None,
         max_calories: Optional[float] = None,
         min_proteins: Optional[float] = None,
@@ -163,25 +163,26 @@ class LPSolver(Solver):
         self.preload_recipe_fpath = preload_recipe_fpath
         self.max_calories = max_calories
         self.min_proteins = min_proteins
-    
+
     def solve(self) -> Union[librecipe.Recipe, None]:
-        # This function will now automatically use the globally loaded NUTRIENTS
-        # No changes are needed here.
         print("Setting up the Linear Programming problem...")
+
         if self.max_calories is not None:
             print(f"--> Overriding max calories to: {self.max_calories} kcal")
         if self.min_proteins is not None:
             print(f"--> Overriding min protein to: {self.min_proteins} g")
-        
-        c = np.array([ing.calculate_cost(1, true_cost=True) for ing in self.ingredients])
+
+        print("--> Building objective function using satisfaction-adjusted costs.")
+        c = np.array([ing.calculate_cost(1, true_cost=False) for ing in self.ingredients])
+
         constraints_A, constraints_b = [], []
         sorted_nutrients = sorted(libnutrient.NUTRIENTS.values(), key=lambda n: n.name)
-
+        
         for nutrient in sorted_nutrients:
             nutrient_vector = np.array([ing.nutrients_qty.get(nutrient, 0) for ing in self.ingredients])
             target_rdi = self.min_proteins if nutrient.name == "Protein" and self.min_proteins is not None else nutrient.rdi
             target_ul = self.max_calories if nutrient.name == "Energy" and self.max_calories is not None else nutrient.ul
-            
+
             if target_rdi > 0:
                 constraints_A.append(-nutrient_vector)
                 constraints_b.append(-target_rdi)
@@ -200,13 +201,12 @@ class LPSolver(Solver):
         A_ub = np.array(constraints_A)
         b_ub = np.array(constraints_b)
 
-        # Bounds logic remains the same
         bounds = []
         preloaded_quantities = {}
         if self.preload_recipe_fpath:
             preloaded_recipe = self._preload_recipe(self.preload_recipe_fpath)
             preloaded_quantities = preloaded_recipe.ingredients_qty
-        
+
         for ing in self.ingredients:
             lower_bound = preloaded_quantities.get(ing, 0)
             energy_per_g = ing.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
@@ -217,17 +217,22 @@ class LPSolver(Solver):
             bounds.append((lower_bound, upper_bound))
 
         print("Solving with scipy.optimize.linprog (method='highs')...")
-        result = linprog(np.array(c), A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+        start_time = time.time()
+        result = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+        end_time = time.time()
+        
+        print(f"Solver finished in {end_time - start_time:.4f} seconds.")
 
         if not result.success:
             print(f"\n--- Solver failed: {result.message} ---")
             return None
         
-        ingredients_qty = {
-            self.ingredients[i]: result.x[i] for i in range(len(self.ingredients)) if result.x[i] > 1e-6
-        }
+        ingredients_qty = {self.ingredients[i]: result.x[i] for i in range(len(self.ingredients)) if result.x[i] > 1e-6}
+        
+        # Instantiate the Recipe object before returning it.
         return librecipe.Recipe(ingredients_qty)
-
+        
+        
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="A nutritionally complete recipe solver.")
