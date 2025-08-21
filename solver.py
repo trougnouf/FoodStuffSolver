@@ -2,14 +2,22 @@ import queue
 import time
 import sys
 from typing import Union, Optional
+import argparse
+import random
 
 import yaml
+import cma
+
+# You may need to install numpy and scipy: pip install numpy scipy
+import numpy as np
+from scipy.optimize import linprog
+
 import libingredient
 import libnutrient
 import librecipe
-import cma
-import random
-import argparse
+
+# Shared constant for max calories from a single ingredient
+MAX_INGREDIENT_CAL = 400
 
 # TODO add calories target (or nutrient override)
 # TODO add is_significant to ingredient wrt quantity and nutrients (eg adding up to 1% of any nutrient is significant)
@@ -17,17 +25,12 @@ import argparse
 # TODO implement ingredient expiration (increases cost according to usage)
 # TODO penalize ingredients' nutrient after they've provided 75% of the RDI
 
-# class AbstractSolver:
-#     def __init__(self, ingredients):
-#         self.ingredients = ingredients
-
-
 class Solver:
-    def _make_base_recipe(init_ingredients_str_qty: Optional[dict[str, float]]):
+    def _make_base_recipe(self, init_ingredients_str_qty: Optional[dict[str, float]]):
         base_ingredients_qty = {ingredient: 0 for ingredient in self.ingredients}
         if init_ingredients_str_qty:
             for ingredient_str, qty in init_ingredients_str_qty.items():
-                for ingredient in ingredients:
+                for ingredient in self.ingredients:
                     if ingredient.name == ingredient_str:
                         base_ingredients_qty[ingredient] = qty
                         break
@@ -43,26 +46,12 @@ class Solver:
                 if nutrient_qty == 0:
                     continue
                 nutrient_cost = ingredient.cost_per_unit / nutrient_qty
-                # nutrient_cost = max(
-                #     nutrient_cost, ingredient.cost_per_unit * ingredient.min_cost_step
-                # )
                 if (
                     nutrient not in self.nutrients_min_cost
                     or nutrient_cost < self.nutrients_min_cost[nutrient]
                 ):
                     self.nutrients_min_cost[nutrient] = nutrient_cost
                     nutrient_min_cost_src[nutrient] = ingredient
-
-    def _compute_greedy_min_cost_to_complete(self, recipe: librecipe.Recipe) -> float:
-        if not recipe.is_safe():
-            return sys.maxsize
-        highest_cost = 0
-        for nutrient, nutrient_qty in recipe.nutrients_qty.items():
-            if nutrient_qty < nutrient.rdi:
-                cost = self.nutrients_min_cost[nutrient] * (nutrient.rdi - nutrient_qty)
-                if cost > highest_cost:
-                    highest_cost = cost
-        return highest_cost
 
     def _preload_recipe(self, fpath: str) -> librecipe.Recipe:
         return librecipe.Recipe.load_from_yaml(
@@ -78,165 +67,7 @@ class Solver:
         self._compute_min_cost_of_nutrients()
 
 
-class NaiveSolver(Solver):
-    def __init__(
-        self,
-        ingredients: list[libingredient.Ingredient],
-        # base_recipe: Optional[librecipe.Recipe] = None,
-        init_ingredients_str_qty: Optional[dict[str, float]] = None,
-        speedup_factor: int = 30,
-        ignore_future_estimate=False,
-    ):
-        super().__init__(ingredients, init_ingredients_str_qty)
-        base_recipe = self._make_base_recipe(init_ingredients_str_qty)
-        self.known_recipes_hashes = set()
-        self.known_recipes_hashes.add(
-            hash(tuple(sorted(base_recipe.ingredients_qty.items())))
-        )
-        self.recipes_to_explore = queue.PriorityQueue()
-        self.recipes_to_explore.put((self._compute_loss(base_recipe), base_recipe))
-        self.backlog = queue.PriorityQueue()
-
-        self.n_explored_recipes = 0
-
-        self.speedup_factor = speedup_factor
-        self.ignore_future_estimate = ignore_future_estimate
-
-        self.known_recipes_hashes.add(
-            hash(tuple(sorted(base_recipe.ingredients_qty.items())))
-        )
-        self.recipes_to_explore = queue.PriorityQueue()
-        self.recipes_to_explore.put((self._compute_loss(base_recipe), base_recipe))
-        self.backlog = queue.PriorityQueue()
-
-        self.n_explored_recipes = 0
-
-        # print("Most efficient nutrient sources:")
-        # for nutrient in self.nutrients_min_cost:
-
-        #     print(f"{nutrient.name}: {nutrient_min_cost_src[nutrient].name}")
-        # print("\n")
-
-    def _compute_loss(self, recipe: librecipe.Recipe) -> float:
-        return (
-            recipe.cost
-            + (
-                0
-                if self.ignore_future_estimate
-                else self._compute_greedy_min_cost_to_complete(recipe)
-            )
-            + (
-                self.speedup_factor
-                - recipe.completeness_score**2 * self.speedup_factor
-                # - recipe.completeness_score * self.speedup_factor
-            )
-        )
-
-    def solve(self) -> librecipe.Recipe:
-        last_stats_print = 0
-        last_recipe_print = 0
-        init_time = time.time()
-        best_full_recipe = None
-        while not (self.recipes_to_explore.empty() and self.backlog.empty()):
-            if self.recipes_to_explore.empty():
-                self.recipes_to_explore, self.backlog = (
-                    self.backlog,
-                    self.recipes_to_explore,
-                )
-            loss, recipe = self.recipes_to_explore.get()
-            # self.known_recipes.add(recipe)
-            if best_full_recipe is not None and recipe.cost > best_full_recipe.cost:
-                continue
-            if recipe.is_complete():
-                print(f"Found a complete recipe with {recipe.cost=}")
-                recipe = self.reduce_cost(recipe)
-                print(f"Tried to reduce cost. {recipe.cost=}")
-                if not best_full_recipe or recipe.cost < best_full_recipe.cost:
-                    best_full_recipe = recipe
-                    recipe.save_to_yaml("best_recipe_ex3.yaml")
-                    recipe.print(long=True)
-                continue
-                return recipe
-            current_additional_recipes = queue.PriorityQueue()
-            for ingredient in self.ingredients:
-                # new_ingredients_qty = recipe.ingredients_qty.copy()
-                # new_ingredients_qty[ingredient] += ingredient.step_qty
-                new_step_size = recipe.find_step_size(ingredient)
-                new_recipe = recipe.expand(ingredient, new_step_size)
-                # new_ingredients_qty[ingredient] += new_step_size
-                new_ingredients_qty_static_hash = hash(
-                    tuple(sorted(new_recipe.ingredients_qty.items()))
-                )
-                if new_ingredients_qty_static_hash in self.known_recipes_hashes:
-                    continue
-                assert new_step_size > 0  # should have continued if 0
-                # TODO check if recipe is an improvement (?)
-                self.known_recipes_hashes.add(new_ingredients_qty_static_hash)
-                # new_recipe = librecipe.Recipe(
-                #     new_ingredients_qty, n_steps=recipe.n_steps + 1
-                # )
-                # if new_recipe not in self.known_recipes and new_recipe.is_safe():
-                if new_recipe.is_safe() and (
-                    best_full_recipe is None or new_recipe.cost < best_full_recipe.cost
-                ):
-                    # self.recipes_to_explore.put(
-                    current_additional_recipes.put(
-                        (
-                            self._compute_loss(new_recipe),
-                            new_recipe,
-                        )
-                    )
-            for _ in range(2):
-                if current_additional_recipes.empty():
-                    break
-                self.recipes_to_explore.put(current_additional_recipes.get())
-            while not current_additional_recipes.empty():
-                self.backlog.put(current_additional_recipes.get())
-            self.n_explored_recipes += 1
-            if last_stats_print + 1000 <= self.n_explored_recipes:
-                print(f"Explored {self.n_explored_recipes} recipes")
-                print(f"Recipes to explore: {self.recipes_to_explore.qsize()}")
-                # print recipe cost, completeness_score, and loss with 2 decimals
-                print(
-                    f"Current {recipe.cost=:.2f}, {recipe.completeness_score=:.3f}, {loss=:.2f}, best full recipe cost: {404 if not best_full_recipe else best_full_recipe.cost:.2f}"
-                )
-                last_stats_print = self.n_explored_recipes
-                if last_recipe_print + 10000 <= self.n_explored_recipes:
-                    print("Current recipe:")
-                    recipe.print()
-                    last_recipe_print = self.n_explored_recipes
-                    print(f"Time elapsed: {time.time() - init_time}")
-                    recipe.save_to_yaml("current_recipe.yaml")
-
-    def reduce_cost(self, recipe: librecipe.Recipe) -> librecipe.Recipe:
-        while True:
-            starting_cost = recipe.cost
-            for ingredient, qty in dict(
-                sorted(
-                    recipe.ingredients_qty.items(),
-                    key=lambda ingredient_qty: ingredient_qty[0].cost_per_unit,
-                    reverse=True,
-                )
-            ).items():
-                if qty > 0:
-                    new_ingredients_qty = recipe.ingredients_qty.copy()
-                    new_ingredients_qty[ingredient] -= 1
-                    new_recipe = librecipe.Recipe(new_ingredients_qty)
-                    if (
-                        new_recipe.is_safe()
-                        and new_recipe.is_complete()
-                        and new_recipe.cost < recipe.cost
-                    ):
-                        recipe = new_recipe
-                        break
-            if recipe.cost == starting_cost:
-                break
-        return recipe
-
-
 class CMASolver(Solver):
-    MAX_INGREDIENT_CAL = 400  # avoid using an ingredient for more than 400 kcal per day
-
     def __init__(
         self,
         ingredients,
@@ -244,33 +75,31 @@ class CMASolver(Solver):
         speedup_factor: int = 2000,
         preload_recipe_fpath: Optional[str] = None,
     ):
+        super().__init__(ingredients, init_ingredients_str_qty)
         self.ingredients = ingredients
         upper_bounds = [
             (
                 ingredient.max_qty
-                or self.MAX_INGREDIENT_CAL
+                or MAX_INGREDIENT_CAL
                 / ingredient.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
             )
-            # * 0.9  # HACK for all nutrients w/ 2/3 calories
             for ingredient in self.ingredients
         ]
         lower_bounds = [0] * len(self.ingredients)
 
-        print(lower_bounds)
-        print(upper_bounds)
         if preload_recipe_fpath:
+            print(f"Loading preloaded recipe from {preload_recipe_fpath} to set starting point for CMA-ES.")
             preloaded_recipe = self._preload_recipe(preload_recipe_fpath)
             for i, ingredient in enumerate(self.ingredients):
                 if ingredient in preloaded_recipe.ingredients_qty:
-                    lower_bounds[i] = min(
-                        preloaded_recipe.ingredients_qty[ingredient],
-                        upper_bounds[i] * 0.99,
-                    )
-                    assert lower_bounds[i] < upper_bounds[i]
+                    # For CMA, we use the preloaded values as the starting point (the initial mean)
+                    lower_bounds[i] = preloaded_recipe.ingredients_qty[ingredient]
+
+        # CMA-ES's second argument is the initial standard deviation (step size).
+        # The first argument is the initial mean (starting point).
         self.es = cma.CMAEvolutionStrategy(
-            lower_bounds.copy(), 0.5, {"bounds": [lower_bounds, upper_bounds]}
+            lower_bounds.copy(), 0.5, {"bounds": [[0]*len(self.ingredients), upper_bounds]}
         )
-        self._compute_min_cost_of_nutrients()
         self.ignore_future_estimate = False
         self.speedup_factor = speedup_factor
         self.best_solution = None
@@ -287,9 +116,9 @@ class CMASolver(Solver):
         return highest_cost
 
     def _compute_loss(self, solution: list[float]) -> float:
-        ingredients_qty = {}
-        for i, ingredient in enumerate(self.ingredients):
-            ingredients_qty[ingredient] = solution[i]
+        ingredients_qty = {
+            ingredient: solution[i] for i, ingredient in enumerate(self.ingredients)
+        }
         recipe = librecipe.Recipe(ingredients_qty)
         res = (
             recipe.cost
@@ -301,55 +130,128 @@ class CMASolver(Solver):
             + (
                 self.speedup_factor
                 - recipe.completeness_score**2
-                * (self.speedup_factor / (1 if recipe.is_complete else 1.5))
-                # - recipe.completeness_score * self.speedup_factor
+                * (self.speedup_factor / (1 if recipe.is_complete() else 1.5))
             )
         )
         if recipe.is_complete():
             if self.best_solution is None or recipe.cost < self.best_solution.cost:
                 self.best_solution = recipe
+                print("\n--- New Best Solution Found ---")
                 recipe.print(long=True)
-                recipe.save_to_yaml(
-                    f"cma_{self.speedup_factor}_2000cal.yaml"
-                )  # TODO _mk_fn(self) and add allergens to fn
+                recipe.save_to_yaml(f"recipe_cma.yaml")
         if random.random() > 0.9995:
-            print("random print:")
+            print("Random sample print:")
             recipe.print(long=False)
         return res
 
     def solve(self):
-        def optimize():
-            while not self.es.stop():
-                solutions = self.es.ask()
-                self.es.tell(solutions, [self._compute_loss(s) for s in solutions])
-                self.es.logger.add()
-                self.es.disp()
-            return self.es.result.xbest
-
-        sol = optimize()
-        print(sol)
-        return sol
+        self.es.optimize(self._compute_loss)
+        return self.best_solution
 
 
-"""
-Future solver idea:
+class LPSolver(Solver):
+    def __init__(self, ingredients, preload_recipe_fpath: Optional[str] = None, **kwargs):
+        super().__init__(ingredients)
+        # Sort ingredients for consistent ordering in vectors and matrices
+        self.ingredients = sorted(ingredients, key=lambda i: i.name)
+        self.preload_recipe_fpath = preload_recipe_fpath
 
-compute the current + future cost of cheapest ingredient
-    for each ingredient: compute actual+future cost and add best 3 ingredients to todo list
+    def solve(self) -> Union[librecipe.Recipe, None]:
+        print("Setting up the Linear Programming problem...")
+        num_ingredients = len(self.ingredients)
 
-make ingredient initialization based on current one: add 1 unit of ingredient to current recipe and compute costs instead of recomputing all
+        # 1. Objective function (c): Minimize cost
+        c = np.array([ing.calculate_cost(1, true_cost=True) for ing in self.ingredients])
 
-# TODO params:
-- set base recipe
-- set custom nutrient min/max values
-- set output fn
-"""
+        # 2. Inequality constraints (A_ub @ x <= b_ub)
+        constraints_A = []
+        constraints_b = []
+        sorted_nutrients = sorted(libnutrient.NUTRIENTS.values(), key=lambda n: n.name)
+        for nutrient in sorted_nutrients:
+            nutrient_vector = np.array([ing.nutrients_qty.get(nutrient, 0) for ing in self.ingredients])
+            if nutrient.rdi > 0: # RDI constraint
+                constraints_A.append(-nutrient_vector)
+                constraints_b.append(-nutrient.rdi)
+            if nutrient.ul is not None: # UL constraint
+                constraints_A.append(nutrient_vector)
+                constraints_b.append(nutrient.ul)
 
-"""Parse argument for ingredients_dpath and list of allergies."""
+        # Omega-3 to Omega-6 ratio constraint
+        omega3 = libnutrient.NUTRIENTS["Omega-3 fatty acid"]
+        omega6 = libnutrient.NUTRIENTS["Omega-6 fatty acid"]
+        omega3_vector = np.array([ing.nutrients_qty.get(omega3, 0) for ing in self.ingredients])
+        omega6_vector = np.array([ing.nutrients_qty.get(omega6, 0) for ing in self.ingredients])
+        ratio_vector = omega3_vector - (librecipe.OMEGA_36_RATIO * omega6_vector)
+        constraints_A.append(-ratio_vector)
+        constraints_b.append(0)
+
+        A_ub = np.array(constraints_A)
+        b_ub = np.array(constraints_b)
+
+        # 3. Load preloaded recipe to set minimum bounds
+        preloaded_quantities = {}
+        if self.preload_recipe_fpath:
+            print(f"Loading preloaded recipe from {self.preload_recipe_fpath} to set minimum ingredient quantities.")
+            try:
+                preloaded_recipe = self._preload_recipe(self.preload_recipe_fpath)
+                preloaded_quantities = preloaded_recipe.ingredients_qty
+                print(f"Minimum quantities will be enforced for: {list(preloaded_quantities.keys())}")
+            except Exception as e:
+                print(f"Warning: Could not load preloaded recipe. Error: {e}. Proceeding without minimums.")
+
+        # 4. Bounds for each ingredient (x_i)
+        bounds = []
+        for ing in self.ingredients:
+            # Set the lower bound from preloaded recipe, or 0 if not present
+            lower_bound = preloaded_quantities.get(ing, 0)
+
+            energy_per_g = ing.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
+            max_cal_qty = MAX_INGREDIENT_CAL / energy_per_g if energy_per_g > 0 else float('inf')
+            upper_bound = min(ing.max_qty, max_cal_qty) if ing.max_qty else max_cal_qty
+            
+            # Sanity check
+            if lower_bound > upper_bound:
+                raise ValueError(
+                    f"Ingredient '{ing.name}': preloaded minimum quantity ({lower_bound}g) "
+                    f"is greater than its maximum allowed quantity ({upper_bound:.2f}g). "
+                    "The problem is infeasible."
+                )
+
+            bounds.append((lower_bound, upper_bound))
+
+        # 5. Solve the Linear Program
+        print("Solving with scipy.optimize.linprog (method='highs')...")
+        start_time = time.time()
+        result = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+        end_time = time.time()
+        
+        print(f"Solver finished in {end_time - start_time:.4f} seconds.")
+
+        if not result.success:
+            print("\n--- Solver failed to find a solution. ---")
+            print(f"Message: {result.message}")
+            print("This may mean no recipe is possible with the given ingredients and constraints.")
+            return None
+
+        # 6. Construct recipe from the optimal solution
+        ingredients_qty = {
+            self.ingredients[i]: result.x[i]
+            for i in range(num_ingredients) if result.x[i] > 1e-6
+        }
+        
+        return librecipe.Recipe(ingredients_qty)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="A nutritionally complete recipe solver.")
+    parser.add_argument(
+        "--solver",
+        type=str,
+        choices=['lp', 'cma'], # Removed 'naive' for brevity, can be re-added if needed
+        default='lp',
+        help="The solver to use. 'lp' for Linear Programming (fast, optimal), 'cma' for CMA-ES."
+    )
+    # ... (rest of arguments are the same) ...
     parser.add_argument(
         "--ingredients_dpaths",
         type=str,
@@ -361,21 +263,26 @@ if __name__ == "__main__":
         "--allergies",
         nargs="+",
         default=[],
-        help="List of allergies (default: [])",
+        help="List of allergies to exclude (default: [])",
     )
     parser.add_argument(
         "--speedup_factor",
         type=int,
         default=2000,
-        help="Speedup factor (default: 2000)",
+        help="Speedup factor for CMA-ES solver (default: 2000)",
     )
     parser.add_argument(
         "--ingredients_augmentations",
         type=str,
         default=None,
-        help="Path to a yaml file containing extra parameters about some ingredients (eg satisfaction_multiplier)",
+        help="Path to a YAML file containing extra parameters for ingredients (e.g., satisfaction_multiplier)",
     )
-    parser.add_argument("--preload_recipe_fpath", type=str, default=None)
+    parser.add_argument(
+        "--preload_recipe_fpath",
+        type=str,
+        default=None,
+        help="Path to a YAML recipe file to use as a starting point (CMA) or to enforce minimum quantities (LP).",
+    )
     args = parser.parse_args()
 
     ingredients = libingredient.get_ingredients(
@@ -385,10 +292,36 @@ if __name__ == "__main__":
         with open(args.ingredients_augmentations, "r") as f:
             augmentations = yaml.safe_load(f)
         libingredient.augment_ingredients(ingredients, augmentations)
-    solver = CMASolver(ingredients, preload_recipe_fpath=args.preload_recipe_fpath)
+
+    solver = None
+    if args.solver == 'lp':
+        print("Initializing Linear Programming (LP) Solver...")
+        solver = LPSolver(
+            ingredients, 
+            preload_recipe_fpath=args.preload_recipe_fpath
+        )
+    elif args.solver == 'cma':
+        print("Initializing CMA-ES Solver...")
+        solver = CMASolver(
+            ingredients, 
+            speedup_factor=args.speedup_factor,
+            preload_recipe_fpath=args.preload_recipe_fpath
+        )
+    else:
+        raise ValueError(f"Unknown solver specified: {args.solver}")
+
     recipe = solver.solve()
-    print("2nd pass")
-    recipe = solver.solve()
-    # recipe.print(long=True)
-    print(recipe)
-    # recipe.save_to_yaml("recipe_cma.yaml")
+
+    if recipe:
+        print("\n--- Solver Finished ---")
+        if args.solver == 'lp':
+            print("Optimal recipe found:")
+        else:
+            print("Best recipe found:")
+        
+        recipe.print(long=True)
+        output_filename = f"recipe_{args.solver}.yaml"
+        recipe.save_to_yaml(output_filename)
+        print(f"\nRecipe saved to {output_filename}")
+    else:
+        print("\nNo feasible recipe was found.")
