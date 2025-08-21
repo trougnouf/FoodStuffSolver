@@ -163,44 +163,32 @@ class LPSolver(Solver):
         self.preload_recipe_fpath = preload_recipe_fpath
         self.max_calories = max_calories
         self.min_proteins = min_proteins
-
+    
     def solve(self) -> Union[librecipe.Recipe, None]:
+        # This function will now automatically use the globally loaded NUTRIENTS
+        # No changes are needed here.
         print("Setting up the Linear Programming problem...")
-
         if self.max_calories is not None:
             print(f"--> Overriding max calories to: {self.max_calories} kcal")
         if self.min_proteins is not None:
             print(f"--> Overriding min protein to: {self.min_proteins} g")
-
-        # 1. Objective function (c): Minimize cost
+        
         c = np.array([ing.calculate_cost(1, true_cost=True) for ing in self.ingredients])
-
-        # 2. Inequality constraints (A_ub @ x <= b_ub)
-        constraints_A = []
-        constraints_b = []
+        constraints_A, constraints_b = [], []
         sorted_nutrients = sorted(libnutrient.NUTRIENTS.values(), key=lambda n: n.name)
 
         for nutrient in sorted_nutrients:
             nutrient_vector = np.array([ing.nutrients_qty.get(nutrient, 0) for ing in self.ingredients])
+            target_rdi = self.min_proteins if nutrient.name == "Protein" and self.min_proteins is not None else nutrient.rdi
+            target_ul = self.max_calories if nutrient.name == "Energy" and self.max_calories is not None else nutrient.ul
             
-            # Determine the target RDI and UL, using overrides if available
-            target_rdi = nutrient.rdi
-            if nutrient.name == "Protein" and self.min_proteins is not None:
-                target_rdi = self.min_proteins
-
-            target_ul = nutrient.ul
-            if nutrient.name == "Energy" and self.max_calories is not None:
-                target_ul = self.max_calories
-
-            # Build constraints with the (potentially overridden) target values
-            if target_rdi > 0:  # RDI constraint: sum(...) >= RDI
+            if target_rdi > 0:
                 constraints_A.append(-nutrient_vector)
                 constraints_b.append(-target_rdi)
-            if target_ul is not None:  # UL constraint: sum(...) <= UL
+            if target_ul is not None:
                 constraints_A.append(nutrient_vector)
                 constraints_b.append(target_ul)
 
-        # Omega-3 to Omega-6 ratio constraint
         omega3 = libnutrient.NUTRIENTS["Omega-3 fatty acid"]
         omega6 = libnutrient.NUTRIENTS["Omega-6 fatty acid"]
         omega3_vector = np.array([ing.nutrients_qty.get(omega3, 0) for ing in self.ingredients])
@@ -212,47 +200,32 @@ class LPSolver(Solver):
         A_ub = np.array(constraints_A)
         b_ub = np.array(constraints_b)
 
-        # 3. Load preloaded recipe to set minimum bounds
+        # Bounds logic remains the same
+        bounds = []
         preloaded_quantities = {}
         if self.preload_recipe_fpath:
-            print(f"Loading preloaded recipe from {self.preload_recipe_fpath} to set minimum ingredient quantities.")
-            try:
-                preloaded_recipe = self._preload_recipe(self.preload_recipe_fpath)
-                preloaded_quantities = preloaded_recipe.ingredients_qty
-                print(f"Minimum quantities will be enforced for: {list(preloaded_quantities.keys())}")
-            except Exception as e:
-                print(f"Warning: Could not load preloaded recipe. Error: {e}. Proceeding without minimums.")
+            preloaded_recipe = self._preload_recipe(self.preload_recipe_fpath)
+            preloaded_quantities = preloaded_recipe.ingredients_qty
         
-        # 4. Bounds for each ingredient (x_i)
-        bounds = []
         for ing in self.ingredients:
             lower_bound = preloaded_quantities.get(ing, 0)
             energy_per_g = ing.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
             max_cal_qty = MAX_INGREDIENT_CAL / energy_per_g if energy_per_g > 0 else float('inf')
             upper_bound = min(ing.max_qty, max_cal_qty) if ing.max_qty else max_cal_qty
             if lower_bound > upper_bound:
-                raise ValueError(f"Ingredient '{ing.name}': preloaded minimum ({lower_bound}g) > max allowed ({upper_bound:.2f}g).")
+                raise ValueError(f"Min quantity for {ing.name} ({lower_bound}g) exceeds max ({upper_bound:.2f}g).")
             bounds.append((lower_bound, upper_bound))
 
-        # 5. Solve the Linear Program
         print("Solving with scipy.optimize.linprog (method='highs')...")
-        start_time = time.time()
-        result = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
-        end_time = time.time()
-        
-        print(f"Solver finished in {end_time - start_time:.4f} seconds.")
+        result = linprog(np.array(c), A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
 
         if not result.success:
-            print("\n--- Solver failed to find a solution. ---")
-            print(f"Message: {result.message}")
+            print(f"\n--- Solver failed: {result.message} ---")
             return None
-
-        # 6. Construct recipe from the optimal solution
-        ingredients_qty = {
-            self.ingredients[i]: result.x[i]
-            for i, _ in enumerate(self.ingredients) if result.x[i] > 1e-6
-        }
         
+        ingredients_qty = {
+            self.ingredients[i]: result.x[i] for i in range(len(self.ingredients)) if result.x[i] > 1e-6
+        }
         return librecipe.Recipe(ingredients_qty)
 
 
@@ -263,56 +236,40 @@ if __name__ == "__main__":
         type=str,
         choices=['lp', 'cma'],
         default='lp',
-        help="The solver to use. 'lp' for Linear Programming (fast, optimal), 'cma' for CMA-ES."
+        help="The solver to use. 'lp' is fast and optimal."
     )
     parser.add_argument(
-        "--ingredients_dpaths",
-        type=str,
-        nargs="+",
-        default=[libingredient.INGREDIENTS_DIR],
-        help=f"Path(s) to ingredients directory·ies (default: {libingredient.INGREDIENTS_DIR})",
-    )
-    parser.add_argument(
-        "--allergies",
-        nargs="+",
-        default=[],
-        help="List of allergies to exclude (default: [])",
-    )
-    parser.add_argument(
-        "--max_calories",
-        type=float,
-        default=None,
-        help="Optional: Override the maximum daily calories (Energy UL). Only for LP solver."
-    )
-    parser.add_argument(
-        "--min_proteins",
-        type=float,
-        default=None,
-        help="Optional: Override the minimum daily protein in grams (Protein RDI). Only for LP solver."
-    )
-    parser.add_argument(
-        "--speedup_factor",
-        type=int,
-        default=2000,
-        help="Speedup factor for CMA-ES solver (default: 2000)",
-    )
-    parser.add_argument(
-        "--ingredients_augmentations",
+        "--nutrient_profile",
         type=str,
         default=None,
-        help="Path to a YAML file containing extra parameters for ingredients.",
+        help="Path to a YAML file defining nutrient RDIs and ULs. If not provided, defaults are used."
     )
     parser.add_argument(
-        "--preload_recipe_fpath",
-        type=str,
-        default=None,
-        help="Path to a YAML recipe file to enforce minimum quantities (LP).",
+        "--ingredients_dpaths", type=str, nargs="+", default=[libingredient.INGREDIENTS_DIR],
+        help=f"Path to ingredients directory (default: {libingredient.INGREDIENTS_DIR})",
     )
+    parser.add_argument(
+        "--allergies", nargs="+", default=[], help="List of allergies to exclude",
+    )
+    parser.add_argument(
+        "--max_calories", type=float, default=None, help="Optional: Override max daily calories (for LP solver)."
+    )
+    parser.add_argument(
+        "--min_proteins", type=float, default=None, help="Optional: Override min daily protein in grams (for LP solver)."
+    )
+    parser.add_argument(
+        "--preload_recipe_fpath", type=str, default=None, help="Path to a YAML recipe to enforce minimum quantities (LP)."
+    )
+    # (other args for CMA etc.)
+    parser.add_argument("--speedup_factor", type=int, default=2000)
+    parser.add_argument("--ingredients_augmentations", type=str, default=None)
     args = parser.parse_args()
 
-    ingredients = libingredient.get_ingredients(
-        dpaths=args.ingredients_dpaths, allergies=args.allergies
-    )
+    # --- INITIALIZE NUTRIENTS ---
+    # This must be done *before* any other part of the code that relies on libnutrient.NUTRIENTS
+    libnutrient.initialize_nutrients(fpath=args.nutrient_profile)
+
+    ingredients = libingredient.get_ingredients(dpaths=args.ingredients_dpaths, allergies=args.allergies)
     if args.ingredients_augmentations:
         with open(args.ingredients_augmentations, "r") as f:
             augmentations = yaml.safe_load(f)
@@ -320,7 +277,6 @@ if __name__ == "__main__":
 
     solver = None
     if args.solver == 'lp':
-        print("Initializing Linear Programming (LP) Solver...")
         solver = LPSolver(
             ingredients, 
             preload_recipe_fpath=args.preload_recipe_fpath,
@@ -328,25 +284,19 @@ if __name__ == "__main__":
             min_proteins=args.min_proteins
         )
     elif args.solver == 'cma':
-        # CMA solver does not currently support these overrides, so we don't pass them
-        print("Initializing CMA-ES Solver...")
         solver = CMASolver(
             ingredients, 
             speedup_factor=args.speedup_factor,
             preload_recipe_fpath=args.preload_recipe_fpath
         )
-    else:
-        raise ValueError(f"Unknown solver specified: {args.solver}")
-
-    recipe = solver.solve()
-
-    if recipe:
-        print("\n--- Solver Finished ---")
-        print("Optimal recipe found:" if args.solver == 'lp' else "Best recipe found:")
-        
-        recipe.print(long=True)
-        output_filename = f"recipe_{args.solver}.yaml"
-        recipe.save_to_yaml(output_filename)
-        print(f"\nRecipe saved to {output_filename}")
-    else:
-        print("\nNo feasible recipe was found.")
+    
+    if solver:
+        recipe = solver.solve()
+        if recipe:
+            print("\n--- Solver Finished ---")
+            recipe.print(long=True)
+            output_filename = f"recipe_{args.solver}.yaml"
+            recipe.save_to_yaml(output_filename)
+            print(f"\nRecipe saved to {output_filename}")
+        else:
+            print("\nNo feasible recipe was found.")

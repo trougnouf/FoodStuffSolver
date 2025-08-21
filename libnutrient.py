@@ -1,5 +1,5 @@
-from typing import Optional
-
+import yaml
+from typing import Optional, Dict
 
 class Nutrient:
     def __init__(
@@ -41,84 +41,122 @@ class Nutrient:
     def __hash__(self):
         return hash(self.name)
 
+# This global variable will hold the loaded nutrient profile.
+NUTRIENTS: Dict[str, Nutrient] = {}
 
-NUTRIENTS = {
-    nutrient_tuple[0]: Nutrient(*nutrient_tuple)
-    for nutrient_tuple in (
-        ("Energy", "kcal", 700, 2250),
-        # ("Energy", "kcal", 700, 1600),  # TODO rm
-        ("Carbohydrate", "g", 0, None),
-        ("Protein", "g", 112, None),  # 1.6 g/kg * 70 kg
-        ("Total lipid (fat)", "g", 0, None),
-        ("Fatty acids, total saturated", "g", 0, None),
-        ("Fatty acids, total monounsaturated", "g", 0, None),
-        ("Fatty acids, total polyunsaturated", "g", 0, None),
-        (
-            "Omega-3 fatty acid",
-            "g",
-            3,
-            None,
-        ),  # Omega‐3 Polyunsaturated Fatty Acids Intake and Blood Pressure: A Dose‐Response Meta‐Analysis of Randomized Controlled Trials
-        ("Omega-6 fatty acid", "g", 0, None),
-        ("Fiber, total dietary", "g", 28, None),
-        ("Cholesterol", "mg", 0, None),
-        # Vitamin A is not dangerous from beta-carotene.
-        # TODO warn user if recipe's vitamin A is over 3000
-        (
-            "Vitamin A, RAE",
-            "µg",
-            1350,
-            3000,
-        ),  # , 3000),  # NAM (2024)  # 900 * (3/2) s.t. 2 meals suffice
-        ("Vitamin B-6", "mg", 1.7, 100),  # NAM, EFSA (2024)
-        ("Vitamin B-12", "µg", 4.0, None),  # EFSA (2024)
-        (
-            "Vitamin C",
-            "mg",
-            330,
-            2000,
-        ),  # EFSA (2024) is 110 mg. More=better is not conclusive, but tripling s.t. RDI=1meal
-        ("Vitamin D", "IU", 900, 4000),  # govt rec. = 600 IU., * 3/2 = 900 IU
-        ("Vitamin E", "mg", 22.5, 300),  # NAM (2024) = 15, * 3/2 = 22.5
-        ("Vitamin K", "µg", 180, None),  # NAM (2024) = 120, * 3/2 = 180
-        ("Thiamin", "mg", 1.8, None),  # NAM (2024) = 1.2, * 3/2 = 1.8
-        ("Riboflavin", "mg", 1.6, None),  # EFSA (2024) = 1.6, * 3/2 = 1.6
-        ("Niacin", "mg", 24, 35),  # NAM (2024) = 16, * 3/2 = 24
-        ("Folate", "µg", 600, 1000),  # NAM (2024) = 400, * 3/2 = 600
-        ("Pantothenic acid", "mg", 7.5, None),  # NAM, EFSA (2024) = 5, * 3/2 = 7.5
-        ("Biotin", "µg", 60, None),  # EFSA (2024) = 40, * 3/2 = 60
-        ("Choline", "mg", 825, 3500),  # NAM (2024) = 550, * 3/2 = 825
-        ("Calcium, Ca", "mg", 1500, 2500),  # NAM (2024) = 1000, * 3/2 = 1500
-        ("Chloride", "g", 0, 3.6),  # 2.3, 3.6),  # not tracked by the USDA
-        ("Chromium", "µg", 0, 35),  # 35, None),  # not tracked by the USDA
-        ("Copper, Cu", "mg", 2.4, 5),  # EFSA (2024) = 1.6, * 3/2 = 2.4
-        ("Iodine, I", "µg", 225, 1100),  # NAM, EFSA (2024) = 150, * 3/2 = 225
-        ("Iron, Fe", "mg", 16.5, 45),  # EFSA (2024) = 11, * 3/2 = 16.5
-        ("Magnesium, Mg", "mg", 630, None),  # NAM (2024) = 420, * 3/2 = 630
-        ("Manganese, Mn", "mg", 4.5, 11),  # EFSA (2024) = 3, * 3/2 = 4.5
-        ("Molybdenum, Mo", "µg", 0, 2000),  # 45, 2000),  # barely tracked by the USDA
-        (
-            "Phosphorus, P",
-            "mg",
-            1050,
-            4000,
-        ),  # US Institute of Medicine = 700, * 3/2 = 1050
-        ("Potassium, K", "mg", 5250, None),  # EFSA (2024) = 3500, * 3/2 = 5250
-        ("Selenium, Se", "µg", 105, 400),  # EFSA (2024) = 70, * 3/2 = 105
-        ("Sodium, Na", "mg", 1750, 2300),  # between NAM's 1500 and EFSA's 2000
-        ("Sulfur", "g", 0, None),  # 2, None), # barely tracked by the USDA
-        (
-            "Zinc, Zn",
-            "mg",
-            16.3,
-            25,
-        ),  # NAM: 11, EFSA: 9.4 to 16.3 depending on phytake intake
-    )
-}
+def get_default_nutrient_definitions():
+    """Returns the hardcoded nutrient definitions with original comments."""
+    # Each item is a tuple: (Name, Unit, RDI, UL, Comment)
+    return [
+        ("Energy", "kcal", 700, 2150, "Calorie goals per meal (assuming 3 meals/day)"),
+        ("Carbohydrate", "g", 0, None, ""),
+        ("Protein", "g", 112, None, "Based on 1.6 g/kg for a 70 kg person"),
+        ("Total lipid (fat)", "g", 0, None, ""),
+        ("Fatty acids, total saturated", "g", 0, None, ""),
+        ("Fatty acids, total monounsaturated", "g", 0, None, ""),
+        ("Fatty acids, total polyunsaturated", "g", 0, None, ""),
+        ("Omega-3 fatty acid", "g", 3, None, "Source: Dose-Response Meta-Analysis of RCTs"),
+        ("Omega-6 fatty acid", "g", 0, None, ""),
+        ("Fiber, total dietary", "g", 28, None, ""),
+        ("Cholesterol", "mg", 0, None, ""),
+        ("Vitamin A, RAE", "µg", 1350, 3000, "NAM (2024), adjusted for 2/3 daily intake"),
+        ("Vitamin B-6", "mg", 1.7, 100, "NAM, EFSA (2024)"),
+        ("Vitamin B-12", "µg", 4.0, None, "EFSA (2024)"),
+        ("Vitamin C", "mg", 330, 2000, "EFSA (2024) is 110mg; tripled for per-meal RDI"),
+        ("Vitamin D", "IU", 900, 4000, "Based on 600 IU govt rec, adjusted for 2/3 daily intake"),
+        ("Vitamin E", "mg", 22.5, 300, "NAM (2024) is 15mg, adjusted for 2/3 daily intake"),
+        ("Vitamin K", "µg", 180, None, "NAM (2024) is 120mg, adjusted for 2/3 daily intake"),
+        ("Thiamin", "mg", 1.8, None, "NAM (2024) is 1.2mg, adjusted for 2/3 daily intake"),
+        ("Riboflavin", "mg", 1.6, None, "EFSA (2024)"),
+        ("Niacin", "mg", 24, 35, "NAM (2024) is 16mg, adjusted for 2/3 daily intake"),
+        ("Folate", "µg", 600, 1000, "NAM (2024) is 400µg, adjusted for 2/3 daily intake"),
+        ("Pantothenic acid", "mg", 7.5, None, "NAM, EFSA (2024) is 5mg, adjusted for 2/3 daily intake"),
+        ("Biotin", "µg", 60, None, "EFSA (2024) is 40µg, adjusted for 2/3 daily intake"),
+        ("Choline", "mg", 825, 3500, "NAM (2024) is 550mg, adjusted for 2/3 daily intake"),
+        ("Calcium, Ca", "mg", 1500, 2500, "NAM (2024) is 1000mg, adjusted for 2/3 daily intake"),
+        ("Chloride", "g", 0, 3.6, "Not tracked by USDA"),
+        ("Chromium", "µg", 0, 35, "Not tracked by USDA"),
+        ("Copper, Cu", "mg", 2.4, 5, "EFSA (2024) is 1.6mg, adjusted for 2/3 daily intake"),
+        ("Iodine, I", "µg", 225, 1100, "NAM, EFSA (2024) is 150µg, adjusted for 2/3 daily intake"),
+        ("Iron, Fe", "mg", 16.5, 45, "EFSA (2024) is 11mg, adjusted for 2/3 daily intake"),
+        ("Magnesium, Mg", "mg", 630, None, "NAM (2024) is 420mg, adjusted for 2/3 daily intake"),
+        ("Manganese, Mn", "mg", 4.5, 11, "EFSA (2024) is 3mg, adjusted for 2/3 daily intake"),
+        ("Molybdenum, Mo", "µg", 0, 2000, "Barely tracked by USDA"),
+        ("Phosphorus, P", "mg", 1050, 4000, "US Inst. of Med. is 700mg, adjusted for 2/3 daily intake"),
+        ("Potassium, K", "mg", 5250, None, "EFSA (2024) is 3500mg, adjusted for 2/3 daily intake"),
+        ("Selenium, Se", "µg", 105, 400, "EFSA (2024) is 70µg, adjusted for 2/3 daily intake"),
+        ("Sodium, Na", "mg", 1750, 2300, "Between NAM (1500mg) and EFSA (2000mg)"),
+        ("Sulfur", "g", 0, None, "Barely tracked by USDA"),
+        ("Zinc, Zn", "mg", 16.3, 25, "NAM: 11, EFSA: 9.4-16.3 depending on phytate intake"),
+    ]
 
-NUTRIENTS["Vitamin A, RAE"]._conversion_functions[("IU", "µg")] = lambda qty: qty * 0.3
-NUTRIENTS["Vitamin E"]._conversion_functions[("IU", "mg")] = lambda qty: qty * 0.67
-NUTRIENTS["Energy"]._conversion_functions[("kJ", "kcal")] = lambda qty: qty / 4.184
+def _apply_special_conversions(nutrients_dict: Dict[str, Nutrient]):
+    """Applies known special unit conversions to a dictionary of Nutrient objects."""
+    if "Vitamin A, RAE" in nutrients_dict:
+        nutrients_dict["Vitamin A, RAE"]._conversion_functions[("IU", "µg")] = lambda qty: qty * 0.3
+    if "Vitamin E" in nutrients_dict:
+        nutrients_dict["Vitamin E"]._conversion_functions[("IU", "mg")] = lambda qty: qty * 0.67
+    if "Energy" in nutrients_dict:
+        nutrients_dict["Energy"]._conversion_functions[("kJ", "kcal")] = lambda qty: qty / 4.184
+    return nutrients_dict
+
+def initialize_nutrients(fpath: Optional[str] = None):
+    """
+    Loads nutrient definitions from a YAML file or uses defaults,
+    then populates the global NUTRIENTS dictionary.
+    """
+    global NUTRIENTS
+    
+    nutrient_data = {}
+    if fpath:
+        print(f"Loading custom nutrient profile from: {fpath}")
+        with open(fpath, 'r', encoding="utf-8") as f:
+            nutrient_data = yaml.safe_load(f)
+    else:
+        print("Loading default nutrient profile.")
+        # Convert default list of tuples to the same dict format as the YAML
+        for name, unit, rdi, ul, _ in get_default_nutrient_definitions():
+            nutrient_data[name] = {'unit': unit, 'rdi': rdi, 'ul': ul}
+
+    # Create Nutrient objects from the loaded data
+    temp_nutrients = {}
+    for name, properties in nutrient_data.items():
+        temp_nutrients[name] = Nutrient(
+            name=name,
+            unit=properties['unit'],
+            rdi=properties['rdi'],
+            ul=properties.get('ul') # Use .get for optional 'ul'
+        )
+    
+    # Apply special conversions and update the global dict
+    NUTRIENTS = _apply_special_conversions(temp_nutrients)
+
+# Initialize with defaults when the module is first imported.
+# This can be overridden later by calling initialize_nutrients() again.
+initialize_nutrients()
+
 
 if __name__ == "__main__":
-    print(NUTRIENTS)
+    # This block allows you to generate a template YAML file.
+    # Run: python libnutrient.py > default_nutrients.yaml
+    
+
+    definitions = get_default_nutrient_definitions()
+    
+    yaml_dict = {}
+    for name, unit, rdi, ul, _ in definitions:
+        entry = {'unit': unit, 'rdi': rdi}
+        # Only include 'ul' if it's not None for a cleaner file
+        if ul is not None:
+            entry['ul'] = ul
+        yaml_dict[name] = entry
+
+    print("# Default Nutrient Profile for Recipe Solver")
+    print("# Generated by `python libnutrient.py`\n")
+    
+    print(yaml.dump(
+        yaml_dict, 
+        sort_keys=False, 
+        indent=2, 
+        allow_unicode=True # This correctly handles characters like 'µ'
+    ))

@@ -317,14 +317,14 @@ class Recipe:
         #         empty_ingredients.append(ingredient)
         # for ingredient in empty_ingredients:
         #     del dict_to_save["ingredients"][ingredient]
-        with open(fn, "w") as f:
+        with open(fn, "w", encoding="utf-8") as f:
             f.write(yaml.dump(dict_to_save, allow_unicode=True, width=float("inf")))
 
     @classmethod
     def load_from_yaml(
         cls, fpath: str, ingredients_list: list[libingredient.Ingredient]
     ):
-        with open(fpath, "r") as f:
+        with open(fpath, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         # Convert ingredients list to a dictionary for quick access
