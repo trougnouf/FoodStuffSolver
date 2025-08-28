@@ -6,10 +6,11 @@ The nutrients match those defined in libnutrient.py and the format matches that
 used in libingredient.py.
 """
 from typing import Union
-
-import requests
+from collections import defaultdict
+import re
 import os
 import sys
+import requests
 
 sys.path.append(".")
 import libnutrient
@@ -17,13 +18,11 @@ import libingredient
 
 API_KEY_FPATH = "usda_api.key"
 
-# TODO add comment to recipe, include missing nutrients to comment
-
 NUTRIENTS_USDA_NAMES = {
     "Energy": ["Energy (Atwater Specific Factors)", "Energy"],
     "Carbohydrate": ["Carbohydrate, by difference"],
     "Omega-3 fatty acid": ["n-3", "PUFA 18:3"],
-    "Omega-6 fatty acid": ["n-6", "PUFA 18:2"],
+    "Omega-6 fatty acid": ["n-6", "PUFA 18:2", "PUFA 20:4"],
     "Vitamin A, RAE": ["Vitamin A, IU"],
     "Vitamin C": ["Vitamin C, total ascorbic acid"],
     "Vitamin D": ["Vitamin D (D2 + D3), International Units"],
@@ -115,33 +114,81 @@ def ingredient_dict_to_obj(
     quantity and unit to an Ingredient object.
     """
     nutrients_qty = {}
-    ignored_nutrients = []
+    unmapped_nutrients = []
+    ignored_as_less_specific = []
+    
     preprocess_ingredient_dict(ingredient_dict)
+
+    # Step 1: Group all raw USDA nutrients by their standard Nutrient object.
+    grouped_nutrients = defaultdict(list)
     for usda_nutrient_name, usda_nutrient_dict in ingredient_dict["nutrients"].items():
-        qty = usda_nutrient_dict["qty"]
-        if qty == 0:
+        if usda_nutrient_dict["qty"] == 0:
             continue
         try:
-            nutrient = get_nutrient_obj(usda_nutrient_name)
+            nutrient_obj = get_nutrient_obj(usda_nutrient_name)
+            grouped_nutrients[nutrient_obj].append({
+                "name": usda_nutrient_name,
+                "qty": usda_nutrient_dict["qty"],
+                "unit": usda_nutrient_dict["unit"]
+            })
         except ValueError:
             print(f"Warning: nutrient {usda_nutrient_name} not found in libnutrient.py")
-            ignored_nutrients.append(usda_nutrient_name)
-            continue
-        if nutrient.unit != usda_nutrient_dict["unit"]:
-            qty = nutrient.convert_qty(qty, usda_nutrient_dict["unit"])
-        qty /= 100  # convert to g
-        if nutrient not in nutrients_qty:
-            nutrients_qty[nutrient] = qty
+            unmapped_nutrients.append(usda_nutrient_name)
+
+    # Step 2: Process each group with the new prioritization logic.
+    for nutrient_obj, nutrient_list in grouped_nutrients.items():
+        final_nutrients_to_sum = []
+        
+        # Use advanced logic only for complex fatty acid groups
+        if nutrient_obj.name in ["Omega-3 fatty acid", "Omega-6 fatty acid"]:
+            # Sub-group nutrients by their base family (e.g., '18:2', '18:3')
+            fatty_acid_families = defaultdict(list)
+            for nutrient in nutrient_list:
+                match = re.search(r'(\d+:\d+)', nutrient['name'])
+                key = match.group(1) if match else nutrient['name']
+                fatty_acid_families[key].append(nutrient)
+
+            # For each family, choose the most specific entry (longest name)
+            for family, members in fatty_acid_families.items():
+                if not members: continue
+                
+                # The 'best' nutrient is assumed to be the one with the most specific name
+                best_nutrient = max(members, key=lambda x: len(x['name']))
+                final_nutrients_to_sum.append(best_nutrient)
+                print(f"For family '{family}', chose '{best_nutrient['name']}' as most specific.")
+
+                # Log the less specific ones that were ignored
+                for member in members:
+                    if member['name'] != best_nutrient['name']:
+                        ignored_as_less_specific.append(member['name'])
         else:
-            print(
-                f'Warning: adding nutrient "{nutrient.name}" twice. Existing qty: {nutrients_qty[nutrient]}. Additional qty: {qty}'
-            )
-            nutrients_qty[nutrient] += qty
+            # For simple nutrients, just use the whole list
+            final_nutrients_to_sum = nutrient_list
+
+        # Step 3: Sum the quantities of the de-duplicated nutrients.
+        total_qty = 0
+        for nutrient_data in final_nutrients_to_sum:
+            qty = nutrient_data["qty"]
+            if nutrient_obj.unit != nutrient_data["unit"]:
+                qty = nutrient_obj.convert_qty(qty, nutrient_data["unit"])
+            total_qty += qty
+        
+        nutrients_qty[nutrient_obj] = total_qty / 100
+
+    # Construct a more descriptive final comment
+    comment_parts = ["Imported from USDA database."]
+    if unmapped_nutrients:
+        comment_parts.append(f"Unmapped nutrients: {'; '.join(sorted(unmapped_nutrients))}")
+    if ignored_as_less_specific:
+        comment_parts.append(f"Ignored less-specific entries: {'; '.join(sorted(ignored_as_less_specific))}")
+    
+    final_comment = " ".join(comment_parts)
+
     ingredient = libingredient.Ingredient(
         name=ingredient_dict["name"],
         nutrients_qty=nutrients_qty,
         food_id=ingredient_dict["food_id"],
-        comment=f"Imported from USDA database. Ignored nutrients: {'; '.join(ignored_nutrients)}",
+        comment=final_comment,
     )
     return ingredient
 
@@ -160,6 +207,6 @@ if __name__ == "__main__":
     if len(sys.argv) == 2:
         food_id = sys.argv[1]
     else:
-        # Test with Sunflower Seeds (SR Legacy) which has both 18:2 and 18:3
-        food_id = 170562
+        # Test with Peanuts (Branded) which has the complex duplicate issue
+        food_id = 173806
     ingredient_id_to_yaml(food_id)
