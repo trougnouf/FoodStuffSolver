@@ -39,21 +39,22 @@ python solver.py
 **Common Options:**
 ```bash
 python solver.py \
-  --max_calories 2000 \
-  --min_proteins 120 \
-  --allergies "Peanuts" "Shellfish" \
-  --ignore_max_qty
+  --max_calories 2150 \
+  --min_proteins 112 \
+  --allergies "Peanuts" "Shellfish"
 ```
 
 ### Key Arguments
 | Argument | Description |
 | :--- | :--- |
-| `--solver` | `lp` (default, fast) or `cma` (evolutionary, slower). |
+| `--solver` | `lp` (default, fast) or `cma` (slower). |
 | `--allergies` | List of allergens to exclude (checks the `allergen` field in YAMLs). |
 | `--max_calories` | Override maximum daily energy (kcal). |
 | `--min_proteins` | Override minimum daily protein (g). |
 | `--min_nutrient` | Set specific min for a nutrient (e.g., `--min_nutrient "Iron, Fe" 20`). |
 | `--ingredients_dpaths`| Custom path to ingredients directory (default: `ingredients`). |
+| `--ignore_max_qty` | Ignore the `max_qty` limit specified in ingredient YAML files. |
+| `--preload_recipe_fpath` | Path to an existing recipe YAML. Used to enforce minimum quantities and set the starting point. |
 
 ## Configuration
 
