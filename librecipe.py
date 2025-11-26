@@ -11,7 +11,7 @@ import sys
 MAX_INGREDIENT_CAL = (
     500  # avoid using an ingredient for more than 500 kcal per day TODO move
 )
-OMEGA_36_RATIO = 0.5
+OMEGA_36_RATIO = 0.50
 
 
 class Recipe:

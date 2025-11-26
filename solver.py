@@ -74,17 +74,23 @@ class CMASolver(Solver):
         init_ingredients_str_qty: Optional[dict[str, float]] = None,
         speedup_factor: int = 2000,
         preload_recipe_fpath: Optional[str] = None,
+        ignore_max_qty: bool = False,
     ):
         super().__init__(ingredients, init_ingredients_str_qty)
         self.ingredients = ingredients
-        upper_bounds = [
-            (
-                ingredient.max_qty
-                or MAX_INGREDIENT_CAL
-                / ingredient.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
-            )
-            for ingredient in self.ingredients
-        ]
+
+        upper_bounds = []
+        for ingredient in self.ingredients:
+            energy_qty = ingredient.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
+            max_from_cals = MAX_INGREDIENT_CAL / energy_qty if energy_qty > 0 else float('inf')
+
+            if ignore_max_qty:
+                upper_bound = max_from_cals
+            else:
+                upper_bound = min(ingredient.max_qty, max_from_cals) if ingredient.max_qty is not None else max_from_cals
+            
+            upper_bounds.append(upper_bound)
+
         lower_bounds = [0] * len(self.ingredients)
 
         if preload_recipe_fpath:
@@ -156,6 +162,9 @@ class LPSolver(Solver):
         preload_recipe_fpath: Optional[str] = None,
         max_calories: Optional[float] = None,
         min_proteins: Optional[float] = None,
+        ignore_max_qty: bool = False,
+        min_nutrient_overrides: Optional[dict[str, float]] = None,
+        max_nutrient_overrides: Optional[dict[str, float]] = None,
         **kwargs
     ):
         super().__init__(ingredients)
@@ -163,14 +172,25 @@ class LPSolver(Solver):
         self.preload_recipe_fpath = preload_recipe_fpath
         self.max_calories = max_calories
         self.min_proteins = min_proteins
+        self.ignore_max_qty = ignore_max_qty
+        self.min_nutrient_overrides = min_nutrient_overrides or {}
+        self.max_nutrient_overrides = max_nutrient_overrides or {}
 
     def solve(self) -> Union[librecipe.Recipe, None]:
         print("Setting up the Linear Programming problem...")
 
+        # --- Logging Overrides ---
         if self.max_calories is not None:
             print(f"--> Overriding max calories to: {self.max_calories} kcal")
         if self.min_proteins is not None:
             print(f"--> Overriding min protein to: {self.min_proteins} g")
+        if self.ignore_max_qty:
+            print("--> Ignoring max_qty limits from ingredient files.")
+        for name, qty in self.min_nutrient_overrides.items():
+            print(f"--> Applying custom minimum for {name}: {qty} {libnutrient.NUTRIENTS[name].unit}")
+        for name, qty in self.max_nutrient_overrides.items():
+            print(f"--> Applying custom maximum for {name}: {qty} {libnutrient.NUTRIENTS[name].unit}")
+
 
         print("--> Building objective function using satisfaction-adjusted costs.")
         c = np.array([ing.calculate_cost(1, true_cost=False) for ing in self.ingredients])
@@ -180,14 +200,29 @@ class LPSolver(Solver):
         
         for nutrient in sorted_nutrients:
             nutrient_vector = np.array([ing.nutrients_qty.get(nutrient, 0) for ing in self.ingredients])
-            target_rdi = self.min_proteins if nutrient.name == "Protein" and self.min_proteins is not None else nutrient.rdi
-            target_ul = self.max_calories if nutrient.name == "Energy" and self.max_calories is not None else nutrient.ul
+
+            # --- Determine target RDI, considering all overrides ---
+            if nutrient.name in self.min_nutrient_overrides:
+                target_rdi = self.min_nutrient_overrides[nutrient.name]
+            elif nutrient.name == "Protein" and self.min_proteins is not None:
+                target_rdi = self.min_proteins
+            else:
+                target_rdi = nutrient.rdi
+
+            # --- Determine target UL, considering all overrides ---
+            if nutrient.name in self.max_nutrient_overrides:
+                target_ul = self.max_nutrient_overrides[nutrient.name]
+            elif nutrient.name == "Energy" and self.max_calories is not None:
+                target_ul = self.max_calories
+            else:
+                target_ul = nutrient.ul
+
 
             if target_rdi > 0:
-                constraints_A.append(-nutrient_vector)
+                constraints_A.append(-nutrient_vector) # Ingredient contribution >= target_rdi
                 constraints_b.append(-target_rdi)
             if target_ul is not None:
-                constraints_A.append(nutrient_vector)
+                constraints_A.append(nutrient_vector) # Ingredient contribution <= target_ul
                 constraints_b.append(target_ul)
 
         omega3 = libnutrient.NUTRIENTS["Omega-3 fatty acid"]
@@ -211,7 +246,12 @@ class LPSolver(Solver):
             lower_bound = preloaded_quantities.get(ing, 0)
             energy_per_g = ing.nutrients_qty.get(libnutrient.NUTRIENTS["Energy"], 0.1)
             max_cal_qty = MAX_INGREDIENT_CAL / energy_per_g if energy_per_g > 0 else float('inf')
-            upper_bound = min(ing.max_qty, max_cal_qty) if ing.max_qty else max_cal_qty
+            
+            if self.ignore_max_qty:
+                upper_bound = max_cal_qty
+            else:
+                upper_bound = min(ing.max_qty, max_cal_qty) if ing.max_qty is not None else max_cal_qty
+
             if lower_bound > upper_bound:
                 raise ValueError(f"Min quantity for {ing.name} ({lower_bound}g) exceeds max ({upper_bound:.2f}g).")
             bounds.append((lower_bound, upper_bound))
@@ -265,14 +305,49 @@ if __name__ == "__main__":
     parser.add_argument(
         "--preload_recipe_fpath", type=str, default=None, help="Path to a YAML recipe to enforce minimum quantities (LP)."
     )
+    parser.add_argument(
+        "--ignore_max_qty",
+        action='store_true',
+        help="Ignore the max_qty limit specified in ingredient files."
+    )
+    parser.add_argument(
+        "--min_nutrient",
+        action='append',
+        nargs=2,
+        metavar=('NUTRIENT_NAME', 'QUANTITY'),
+        help='Set a minimum quantity for a nutrient. E.g., --min-nutrient "Iron, Fe" 40'
+    )
+    parser.add_argument(
+        "--max_nutrient",
+        action='append',
+        nargs=2,
+        metavar=('NUTRIENT_NAME', 'QUANTITY'),
+        help='Set a maximum quantity for a nutrient. E.g., --max-nutrient "Vitamin C" 1000'
+    )
     # (other args for CMA etc.)
     parser.add_argument("--speedup_factor", type=int, default=2000)
     parser.add_argument("--ingredients_augmentations", type=str, default=None)
     args = parser.parse_args()
 
+
     # --- INITIALIZE NUTRIENTS ---
-    # This must be done *before* any other part of the code that relies on libnutrient.NUTRIENTS
     libnutrient.initialize_nutrients(fpath=args.nutrient_profile)
+
+    # --- PROCESS NUTRIENT OVERRIDES FROM CLI ---
+    min_nutrient_overrides = {}
+    if args.min_nutrient:
+        for name, qty in args.min_nutrient:
+            if name not in libnutrient.NUTRIENTS:
+                raise ValueError(f"Unknown nutrient specified in --min-nutrient: {name}")
+            min_nutrient_overrides[name] = float(qty)
+
+    max_nutrient_overrides = {}
+    if args.max_nutrient:
+        for name, qty in args.max_nutrient:
+            if name not in libnutrient.NUTRIENTS:
+                raise ValueError(f"Unknown nutrient specified in --max-nutrient: {name}")
+            max_nutrient_overrides[name] = float(qty)
+
 
     ingredients = libingredient.get_ingredients(dpaths=args.ingredients_dpaths, allergies=args.allergies)
     if args.ingredients_augmentations:
@@ -283,16 +358,22 @@ if __name__ == "__main__":
     solver = None
     if args.solver == 'lp':
         solver = LPSolver(
-            ingredients, 
+            ingredients,
             preload_recipe_fpath=args.preload_recipe_fpath,
             max_calories=args.max_calories,
-            min_proteins=args.min_proteins
+            min_proteins=args.min_proteins,
+            ignore_max_qty=args.ignore_max_qty,
+            min_nutrient_overrides=min_nutrient_overrides,
+            max_nutrient_overrides=max_nutrient_overrides
         )
     elif args.solver == 'cma':
         solver = CMASolver(
-            ingredients, 
+            ingredients,
             speedup_factor=args.speedup_factor,
-            preload_recipe_fpath=args.preload_recipe_fpath
+            preload_recipe_fpath=args.preload_recipe_fpath,
+            ignore_max_qty=args.ignore_max_qty,
+            min_nutrient_overrides=min_nutrient_overrides,
+            max_nutrient_overrides=max_nutrient_overrides
         )
     
     if solver:
